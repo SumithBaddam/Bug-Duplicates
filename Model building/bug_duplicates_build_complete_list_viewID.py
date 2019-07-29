@@ -1,9 +1,7 @@
 #This is only for viewID and queryID. This needs to be run after the cluterID model is trained on trainSet
-# python ./bug_duplicates_build_complete_list.py --env Prod --viewID 673 --queryID 2061
-# python ./bug_duplicates_build_complete_list.py --env Prod --cluster 3
+# python ./bug_duplicates_build_complete_list_viewID.py --env Prod --viewID 436 --queryID 1452
 
-#The build and all if fine for clusterID and training.
-#But for testing we need not build budTestSet_viewID_queryID, instead we can direcly build a potCFD kind of thing with a new column complete for each bug.
+#/auto/vgapps-cstg02-vapps/analytics/csap/models/files/bugDups/
 from time import time
 import pandas as pd
 import numpy as np
@@ -18,7 +16,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.base import TransformerMixin
 import matplotlib.pyplot as plt
 import itertools
-import datetime
 import numpy as np
 import jsondatetime as json2
 import keras
@@ -61,13 +58,17 @@ from sklearn.metrics import roc_curve, auc
 #Setting up the config.ini file parameters
 settings = configparser.ConfigParser()
 settings.read('/data/ingestion/config.ini')
+train_prefix = str(settings.get("BugDuplicates","training_prefix"))
+model_path = str(settings.get("BugDuplicates","modelfilepath"))
+test_prefix = str(settings.get("BugDuplicates","test_prefix"))
+potcfd_view_prefix = str(settings.get("Potential_CFD","viewPrefix"))
 
 #Parser options
 options = None
 
 stops = set(stopwords.words('english'))
 max_seq_length = 150 #150 #If only headline, let's use small length
-text_cols = ['complete1', 'complete2']
+text_cols = ['wrdEmbSet']
 embedding_dim = 150 #300
 
 
@@ -77,6 +78,7 @@ def parse_options():
     parser.add_argument("--clusterID", default="", help ='Comma seperated cluster-ids', type=str, metavar='c')
     parser.add_argument("--viewID", default="", help ='View ID', type=str, metavar='v')
     parser.add_argument("--queryID", default="", help ='Query ID', type=str, metavar='q')
+    parser.add_argument("--bu", default="", help ='BU', type=str, metavar='q')
     args = parser.parse_args()
     
     return args
@@ -164,38 +166,36 @@ class DataFrameImputer(TransformerMixin):
 def load_data(db, collection, is_train):
 	cursor = collection.find({})
 	df =  pd.DataFrame(list(cursor))
-	df['complete1'] = df["Headline"].astype(str) + " " + df["ENCL-Description"].astype(str)
-	df['complete2'] = df["Headline2"].astype(str) + " " + df["ENCL-Description2"].astype(str)
+	if(df.shape[0] > 0):
+		df['wrdEmbSet'] = df["Headline"].astype(str) + " " + df["ENCL-Description"].astype(str)
+	#df['complete2'] = df["Headline2"].astype(str) + " " + df["ENCL-Description2"].astype(str)
 	return df
 
 
 def build_test_data_text(test_df, cluster, db, is_view, view_id, query_id):
-	filename = '/auto/vgapps-cstg02-vapps/analytics/csap/models/files/bugDups/w2vmodel_' + str(cluster) + '.bin'
+	filename = str(model_path) + 'w2vmodel_' + str(cluster) + '.bin' #'/data/csap_models/bugDups/w2vmodel_' + str(cluster) + '.bin'
 	model = Word2Vec.load(filename)
 	print("Loaded the W2V")
 	words = list(model.wv.vocab)
 
-	f = '/auto/vgapps-cstg02-vapps/analytics/csap/models/files/bugDups/vocab_model_' + str(cluster) + '.json'
+	f = str(model_path) + 'vocab_model_' + str(cluster) + '.json' #'/data/csap_models/bugDups/vocab_model_' + str(cluster) + '.json'
 	vocabulary = json.load(open(f, 'r'))
 
-	thefile = '/auto/vgapps-cstg02-vapps/analytics/csap/models/files/bugDups/inv_vocab_model_' + str(cluster) + '.json'
+	thefile = str(model_path) + 'inv_vocab_model_' + str(cluster) + '.json' #'/data/csap_models/bugDups/inv_vocab_model_' + str(cluster) + '.json'
 	with open (thefile, 'rb') as fp:
 		inverse_vocabulary = pickle.load(fp)
 
 	c=0
 	q1=[0]*(test_df.shape[0])
-	q2=[0]*(test_df.shape[0])
 	a = -1
 	s = 0
-	# Iterate over the questions only of both training and test datasets
-	for dataset in [test_df]:#[train_df, test_df]:
+	for dataset in [test_df]:
 		for index, row in dataset.iterrows():
-			print(a, test_df.shape[0])
-			a = a+1
-			# Iterate through the text of both questions of the row
+			#print(a, test_df.shape[0])
+			a = a + 1
 			for question in text_cols:
 				c = c + 1
-				q2n = []  # q2n -> question numbers representation
+				q2n = []
 				for word in text_to_word_list(row[question]):
 					# Check for unwanted words
 					if word.lower() in stops and word.lower() not in words: #word2vec.vocab:
@@ -207,50 +207,59 @@ def build_test_data_text(test_df, cluster, db, is_view, view_id, query_id):
 						s = 1
 					else:
 						q2n.append(vocabulary[word])
-				# Replace questions as word to question as number representation
-				if(c%2 != 0):
-					 q1[a] = q2n
-				else:
-					 q2[a] = q2n
-				#dataset.set_value(index, question, q2n)
-
-	test_df['complete1'] = q1
-	test_df['complete2'] = q2
+				q1[a] = q2n
+				
+	print(len(q1), test_df.shape[0])
+	test_df['wrdEmbSet'] = q1
 	if(is_view == True):
-		c = "BugDupsTestSet_" + str(view_id) + "_" + str(query_id) + "_complete"
+		c = str(test_prefix ) + str(view_id) + "_" + str(query_id) + "_complete" #"BugDupsTestSet_" + str(view_id) + "_" + str(query_id) + "_complete"
+		p = str(test_prefix ) + str(view_id) + "_" + str(query_id) + "_results" #"BugDupsTestSet_" + str(view_id) + "_" + str(query_id) + "_complete"
 	else:
 		c = "BugDupsTestSet_" + str(cluster) + "_complete"
+		p = "BugDupsTestSet_" + str(cluster) + "_results"
 
 	print(c)
 	collection = db[c]
-	d = test_df[['IDENTIFIER', 'complete1', 'Headline', 'ENCL-Description', 'DE_MANAGER_USERID', 'SEVERITY_CODE', 'LIFECYCLE_STATE_CODE', 'PROJECT', 'PRODUCT', 'COMPONENT', 'AGE',  'FEATURE', 'RELEASE_NOTE', 'SA_ATTACHMENT_INDIC', 'CR_ATTACHMENT_INDIC', 'UT_ATTACHMENT_INDIC', 'IMPACT', 'ORIGIN', 'IS_CUSTOMER_VISIBLE', 'TICKETS_COUNT', 'INCOMING_INDIC', 'BACKLOG_INDIC', 'DISPOSED_INDIC', 'TS_INDIC', 'SS_INDIC', 'OIB_INDIC', 'STATE_ASSIGN_INDIC', 'STATE_CLOSE_INDIC', 'STATE_DUPLICATE_INDIC', 'STATE_FORWARD_INDIC', 'STATE_HELD_INDIC', 'STATE_INFO_INDIC', 'STATE_JUNK_INDIC', 'STATE_MORE_INDIC', 'STATE_NEW_INDIC', 'STATE_OPEN_INDIC', 'STATE_POSTPONE_INDIC', 'STATE_RESOLVE_INDIC', 'STATE_SUBMIT_INDIC', 'STATE_UNREP_INDIC', 'STATE_VERIFY_INDIC', 'STATE_WAIT_INDIC', 'CFR_INDIC', 'S12RD_INDIC', 'S123RD_INDIC', 'MISSING_SS_EVAL_INDIC', 'S123_INDIC', 'S12_INDIC', 'RNE_INDIC', 'UPDATED_BY', 'DEV_ESCAPE_ACTIVITY', 'RELEASED_CODE', 'TEST_EDP_ACTIVITY',  'TEST_EDP_PHASE', 'RESOLVER_ANALYSIS_INDIC', 'SUBMITTER_ANALYSIS_INDIC', 'EDP_ANALYSIS_INDIC', 'RETI_ANALYSIS_INDIC', 'DESIGN_REVIEW_ESCAPE_INDIC', 'STATIC_ANALYSIS_ESCAPE_INDIC', 'FUNC_TEST_ESCAPE_INDIC', 'SELECT_REG_ESCAPE_INDIC', 'CODE_REVIEW_ESCAPE_INDIC', 'UNIT_TEST_ESCAPE_INDIC', 'DEV_ESCAPE_INDIC', 'FEATURE_TEST_ESCAPE_INDIC', 'REG_TEST_ESCAPE_INDIC', 'SYSTEM_TEST_ESCAPE_INDIC', 'SOLUTION_TEST_ESCAPE_INDIC', 'INT_TEST_ESCAPE_INDIC', 'GO_TEST_ESCAPE_INDIC', 'COMPLETE_ESCAPE_INDIC', 'SR_CNT', 'PSIRT_INDIC',  'BADCODEFLAG',   'RISK_OWNER', 'SIR', 'PSIRT_FLAG', 'URC_DISPOSED_INDIC', 'CLOSED_DISPOSED_INDIC', 'REGRESSION_BUG_FLAG', 'SUBMITTED_DATE', 'DUPLICATE_OF', 'complete2', 'Headline2', 'ENCL-Description2', 'DE_MANAGER_USERID2', 'SEVERITY_CODE2', 'LIFECYCLE_STATE_CODE2', 'PROJECT2', 'PRODUCT2', 'COMPONENT2', 'AGE2', 'FEATURE2', 'RELEASE_NOTE2', 'SA_ATTACHMENT_INDIC2', 'CR_ATTACHMENT_INDIC2', 'UT_ATTACHMENT_INDIC2', 'IMPACT2', 'ORIGIN2', 'IS_CUSTOMER_VISIBLE2', 'TICKETS_COUNT2', 'INCOMING_INDIC2', 'BACKLOG_INDIC2', 'DISPOSED_INDIC2', 'TS_INDIC2', 'SS_INDIC2', 'OIB_INDIC2', 'STATE_ASSIGN_INDIC2', 'STATE_CLOSE_INDIC2', 'STATE_DUPLICATE_INDIC2', 'STATE_FORWARD_INDIC2', 'STATE_HELD_INDIC2', 'STATE_INFO_INDIC2', 'STATE_JUNK_INDIC2', 'STATE_MORE_INDIC2', 'STATE_NEW_INDIC2', 'STATE_OPEN_INDIC2', 'STATE_POSTPONE_INDIC2', 'STATE_RESOLVE_INDIC2', 'STATE_SUBMIT_INDIC2', 'STATE_UNREP_INDIC2', 'STATE_VERIFY_INDIC2', 'STATE_WAIT_INDIC2', 'CFR_INDIC2', 'S12RD_INDIC2', 'S123RD_INDIC2', 'MISSING_SS_EVAL_INDIC2', 'S123_INDIC2', 'S12_INDIC2', 'RNE_INDIC2', 'UPDATED_BY2', 'DEV_ESCAPE_ACTIVITY2', 'RELEASED_CODE2', 'TEST_EDP_ACTIVITY2', 'TEST_EDP_PHASE2', 'RESOLVER_ANALYSIS_INDIC2', 'SUBMITTER_ANALYSIS_INDIC2', 'EDP_ANALYSIS_INDIC2', 'RETI_ANALYSIS_INDIC2', 'DESIGN_REVIEW_ESCAPE_INDIC2', 'STATIC_ANALYSIS_ESCAPE_INDIC2', 'FUNC_TEST_ESCAPE_INDIC2', 'SELECT_REG_ESCAPE_INDIC2', 'CODE_REVIEW_ESCAPE_INDIC2', 'UNIT_TEST_ESCAPE_INDIC2', 'DEV_ESCAPE_INDIC2', 'FEATURE_TEST_ESCAPE_INDIC2', 'REG_TEST_ESCAPE_INDIC2', 'SYSTEM_TEST_ESCAPE_INDIC2', 'SOLUTION_TEST_ESCAPE_INDIC2', 'INT_TEST_ESCAPE_INDIC2', 'GO_TEST_ESCAPE_INDIC2', 'COMPLETE_ESCAPE_INDIC2', 'SR_CNT2', 'PSIRT_INDIC2', 'BADCODEFLAG2',  'RISK_OWNER2', 'SIR2', 'PSIRT_FLAG2', 'URC_DISPOSED_INDIC2', 'CLOSED_DISPOSED_INDIC2', 'REGRESSION_BUG_FLAG2', 'is_duplicate']] #[['is_duplicate', 'SUBMITTED_DATE', 'IDENTIFIER', 'DUPLICATE_OF', 'Headline', 'ENCL-Description', 'Headline2', 'ENCL-Description2', 'complete1', 'complete2', 'PRODUCT', 'PRODUCT2', 'PROJECT', 'PROJECT2', 'COMPONENT', 'COMPONENT2']]
-	print(d.columns)
-	'''
-	d = pd.DataFrame()
-	d['IDENTIFIER'] = t_df['IDENTIFIER']
-	d['complete1'] = t_df['complete1']
-	d['DUPLICATE_OF'] = t_df['DUPLICATE_OF']
-	d['complete2'] = t_df['complete2']
-	d['Headline2'] = t_df['Headline2']
-	d['Headline'] = t_df['Headline']
-	d['ENCL-Description'] = t_df['ENCL-Description']
-	d['ENCL-Description2'] = t_df['ENCL-Description2']
-	d['is_duplicate'] = t_df['is_duplicate']
-	d['PRODUCT'] = t_df['PRODUCT']
-	d['PRODUCT2'] = t_df['PRODUCT2']
-	d['PROJECT'] = t_df['PROJECT']
-	d['PROJECT2'] = t_df['PROJECT2']
-	d['COMPONENT'] = t_df['COMPONENT']
-	d['COMPONENT2'] = t_df['COMPONENT2']
-	d['SUBMITTED_DATE'] = t_df['SUBMITTED_DATE']
-	'''
+	existing_coll = db[c] #db[p] #Previously wrongly used. Was removes bugs only if they already exist in _results collection. Now changed it to _complete collection.
+
+	#Removing  the duplicates
+	cursor = existing_coll.find({})
+	existing_bugs =  pd.DataFrame(list(cursor))
+	a = []
+	if(existing_bugs.shape[0] != 0):
+		a = existing_bugs['IDENTIFIER'].tolist()
+
+	#['IDENTIFIER', 'complete1', 'Headline', 'ENCL-Description', 'DE_MANAGER_USERID', 'SEVERITY_CODE', 'LIFECYCLE_STATE_CODE', 'PROJECT', 'PRODUCT', 'COMPONENT', 'FEATURE', 'IMPACT', 'ORIGIN', 'RISK_OWNER', 'SUBMITTED_DATE', 'DUPLICATE_OF']
+	d = test_df[['IDENTIFIER', 'wrdEmbSet', 'Headline', 'ENCL-Description', 'DE_MANAGER_USERID', 'SEVERITY_CODE', 'LIFECYCLE_STATE_CODE', 'PROJECT', 'PRODUCT', 'COMPONENT', 'AGE',  'FEATURE', 'RELEASE_NOTE', 'SA_ATTACHMENT_INDIC', 'CR_ATTACHMENT_INDIC', 'UT_ATTACHMENT_INDIC', 'IMPACT', 'ORIGIN', 'IS_CUSTOMER_VISIBLE', 'TICKETS_COUNT', 'INCOMING_INDIC', 'BACKLOG_INDIC', 'DISPOSED_INDIC', 'TS_INDIC', 'SS_INDIC', 'OIB_INDIC', 'STATE_ASSIGN_INDIC', 'STATE_CLOSE_INDIC', 'STATE_DUPLICATE_INDIC', 'STATE_FORWARD_INDIC', 'STATE_HELD_INDIC', 'STATE_INFO_INDIC', 'STATE_JUNK_INDIC', 'STATE_MORE_INDIC', 'STATE_NEW_INDIC', 'STATE_OPEN_INDIC', 'STATE_POSTPONE_INDIC', 'STATE_RESOLVE_INDIC', 'STATE_SUBMIT_INDIC', 'STATE_UNREP_INDIC', 'STATE_VERIFY_INDIC', 'STATE_WAIT_INDIC', 'CFR_INDIC', 'S12RD_INDIC', 'S123RD_INDIC', 'MISSING_SS_EVAL_INDIC', 'S123_INDIC', 'S12_INDIC', 'RNE_INDIC', 'UPDATED_BY', 'DEV_ESCAPE_ACTIVITY', 'RELEASED_CODE', 'TEST_EDP_ACTIVITY',  'TEST_EDP_PHASE', 'RESOLVER_ANALYSIS_INDIC', 'SUBMITTER_ANALYSIS_INDIC', 'EDP_ANALYSIS_INDIC', 'RETI_ANALYSIS_INDIC', 'DESIGN_REVIEW_ESCAPE_INDIC', 'STATIC_ANALYSIS_ESCAPE_INDIC', 'FUNC_TEST_ESCAPE_INDIC', 'SELECT_REG_ESCAPE_INDIC', 'CODE_REVIEW_ESCAPE_INDIC', 'UNIT_TEST_ESCAPE_INDIC', 'DEV_ESCAPE_INDIC', 'FEATURE_TEST_ESCAPE_INDIC', 'REG_TEST_ESCAPE_INDIC', 'SYSTEM_TEST_ESCAPE_INDIC', 'SOLUTION_TEST_ESCAPE_INDIC', 'INT_TEST_ESCAPE_INDIC', 'GO_TEST_ESCAPE_INDIC', 'COMPLETE_ESCAPE_INDIC', 'SR_CNT', 'PSIRT_INDIC',  'BADCODEFLAG',   'RISK_OWNER', 'SIR', 'PSIRT_FLAG', 'URC_DISPOSED_INDIC', 'CLOSED_DISPOSED_INDIC', 'REGRESSION_BUG_FLAG', 'SUBMITTED_DATE', 'DUPLICATE_OF']]
+	d = d.drop_duplicates(subset='IDENTIFIER', keep="last")
+	now = datetime.datetime.now()
+	d['emb_last_run_date'] = now.strftime("%Y-%m-%d")
+	d.reset_index(drop = True, inplace = True)
+	
+	d = d[~d['IDENTIFIER'].isin(a)]
+
 	records = json.loads(d.T.to_json()).values()
 	print('Records loaded')
-	collection.drop()
+	#collection.drop()
 	collection.create_index([("IDENTIFIER", pymongo.ASCENDING), ("DUPLICATE_OF", pymongo.ASCENDING)], unique=True)
 	collection.insert(records)
 
 	return 0
+
+def get_cluster_id(db, project):
+    collection = db[settings.get('Potential_CFD', 'proj_cluster')]
+    cursor = collection.find({})
+    clusters =  pd.DataFrame(list(cursor))
+    project_clusters = []
+    groups = clusters.groupby('Cluster')
+    for name, group in groups:
+        project_clusters.append(list(group['Project']))
+    print(project_clusters)
+    for i in range(0, len(project_clusters)):
+        if(project in project_clusters[i]):
+            cluster_id = i + 1
+            return cluster_id
+    return -1
 
 
 def main():
@@ -262,24 +271,74 @@ def main():
 		key = "csap_stage_database"
 
 	db = get_db(settings, key)
+	print("INFO: Processing CQI Queries")
 
-	if(options.viewID == ""):
-		cluster_id = int(options.clusterID)
-		coll_name = "BugDupsTrainSet_" + str(cluster_id)
-		is_view = False
-		collection = db[coll_name] #db['BugDupsTrainSet_all_3']
-		print(collection)
-		df = load_data(db, collection, True)
-		build_test_data_text(df, cluster_id, db, is_view, 0, 0)
-	else:
-		cluster_id = 3
-		coll_name = "BugDupsTestSet_" + str(options.viewID) + "_" + str(options.queryID)
+	queries = get_enabled_queries(settings,db,"bugdups",options.viewID, options.queryID, options.bu)
+	for q in queries:
+		options.queryID = int(q["query_id"])
+		options.viewID = int(q["view_id"])
+		if(options.viewID == 0):
+			options.viewID = "Security"
+		print(options.viewID, options.queryID)
+		coll_name = str(potcfd_view_prefix) + str(options.viewID) + "_" + str(options.queryID) #"PotentialCFD_ViewSet_" + str(options.viewID) + "_" + str(options.queryID)
 		is_view = True
-		collection = db[coll_name] #db['BugDupsTrainSet_all_639_1968_new']
+		collection = db[coll_name]
 		print(collection)
+
 		df = load_data(db, collection, True)
-		build_test_data_text(df, cluster_id, db, is_view, int(options.viewID), int(options.queryID))
-	
+		#Checking if the collection is empty or not present
+		if(df.shape[0] > 0):
+			c = str(test_prefix ) + str(options.viewID) + "_" + str(options.queryID) + "_complete"
+			col = db[c]
+			cursor = col.find({})
+			last_date_df =  pd.DataFrame(list(cursor))
+			if(last_date_df.shape[0] > 0):
+				emb_last_run_date = last_date_df['emb_last_run_date'].iloc[-1]
+				df = df[df['csap_last_run_date'] > emb_last_run_date]
+
+			print(df.shape)
+			if(df.shape[0] > 0):
+				project = list(df['PROJECT'].unique())[0]
+				cluster_id = get_cluster_id(db, project)
+				print(cluster_id)
+				build_test_data_text(df, cluster_id, db, is_view, options.viewID, int(options.queryID))
+			else:
+				print("Nothing new in ", options.viewID, options.queryID)
+		else:
+			print("No data available for this queryID")
+
+	'''
+	print("INFO: Processing User Defined Queries")
+	options.viewID = "0"
+	queries = get_enabled_queries(settings,db,"bugdups",options.viewID, options.queryID, options.bu)
+
+	for q in queries:
+		options.queryID = int(q["query_id"])
+		options.viewID = int(q["view_id"])
+
+		coll_name = str(potcfd_view_prefix) + str(options.viewID) + "_" + str(options.queryID) #"PotentialCFD_ViewSet_" + str(options.viewID) + "_" + str(options.queryID)
+		is_view = True
+		collection = db[coll_name]
+		print(collection)
+
+		df = load_data(db, collection, True)
+		c = str(test_prefix ) + str(options.viewID) + "_" + str(options.queryID) + "_complete"
+		col = db[c]
+		cursor = col.find({})
+		last_date_df =  pd.DataFrame(list(cursor))
+		if(last_date_df.shape[0] > 0):
+			emb_last_run_date = last_date_df['emb_last_run_date'].iloc[-1]
+			df = df[df['csap_last_run_date'] > emb_last_run_date]
+
+		print(df.shape)
+		if(df.shape[0] > 0):
+			project = list(df['PROJECT'].unique())[0]
+			cluster_id = get_cluster_id(db, project)
+			print(cluster_id)
+			build_test_data_text(df, cluster_id, db, is_view, options.viewID, int(options.queryID))
+		else:
+			print("Nothing new in ", options.viewID, options.queryID)
+	'''
 
 if __name__ == "__main__":
     main()
